@@ -26,8 +26,9 @@ myKey <- "AIzaSyBzstY2XKKisJNMCnwWUJoO31naqtFpg_w"
 
 #Introduction
 ##Project purpose and motivation
-![](https://github.com/aliceafriedman/Data607_Final/Bikelash.png)
+![](Bikelash.png)
 
+\n  
 Bike lanes are controversial! Complaints about bike lanes are common in local media, but how much do New York residents actually object?
 
 Using publicly available data on the location and timing of installation of new bike lanes in NYC and messages from the public sent to the NYC Department of Transportation, we will explore whether there is any correlation between public dissatisfaction with bike lanes and the amount of new bike lanes installed in a given calendar year.
@@ -96,13 +97,7 @@ download <- function(filename, baseurl, folder, reg = ".*") {
     Sys.sleep(1)
   }
 }
-```
 
-###Step 4: Run the function to download the file
-
-The following code will check to see if you have a "data/temp" folder, and then create one if it does not exist, and then download the file(s) to that folder. This will appear in your working drive, wherever that is set.
-
-```{r run_download}
 #set arguments to function
 baseurl <- "https://data.cityofnewyork.us" #note: this requires inspection of the website to determine how the links work
 folder <- "data/temp"
@@ -112,8 +107,9 @@ reg <- "[[:alnum:]]+[.]zip$" # accounts for path inside filename
 download(filenames_list[[1]], baseurl, folder, reg)
 ```
 
-###Step 5: Unzip the file to access and load the CSV into a data frame
+###Step 4: Unzip the file to access and load the CSV into a data frame
 
+Next, we will check our "data/temp" folder to see what files have been downloaded, and then unzip them into a "bike" subfolder in a data folder.
 ```{r unzip}
 #list files
 filelist <- list.files("data/temp")
@@ -126,14 +122,23 @@ unzip(str_c("data/temp/", "routes.zip"), exdir = "data/bike") #unzip tp data fol
 list.files("data/bike") #read data folder to see what's there now
 ```
 
+###Step 5: Read shapefile using ```rgdal```
 
-###Step 6: Read shapefile using ```rgdal```
+Next, we will load the downloaded files into a single R object using the ```rgdal:readOGR``` function. 
 
 ```{r shapefile, warning = FALSE}
 library(rgdal)
 filepath <- "data/bike"
 bikeSHP <- readOGR(filepath, "nyc_bike_routes_2017")
 summary(bikeSHP)
+```
+
+###Step 6: Delete the downloaded files
+
+Lastly, we will delete the downloaded files, now that they have been sucessfully loaded into R, to save memory. Those were some very large files!
+
+```{r delete}
+unlink("data", recursive = TRUE)
 ```
 
 ##Dataset 2: Commissioner’s Correspondence Unit messages (JSON)
@@ -153,7 +158,7 @@ After inspecting the data on NYC's Open Data visualizer I determined that there 
 
 One note: Because JSON data does not have "nulls" per se (rather, the records are simply not there if not explicitly entered as "NA"), there are some fields present in each API call that are missing in the other two. For this reason, I have used ```full_join``` instead of ```union``` to merge the datasets into one.
 
-JSON data from an API is a lot easier to load (2 steps instead of 7) than parsing a website to find a zipped file containing a shapefile!
+JSON data from an API is a lot easier to load (2 steps instead of 6) than parsing a website to find a zipped file containing a shapefile!
 
 ```{r API, cache = TRUE, message = FALSE}
 baseurl <- "https://data.cityofnewyork.us/resource/paw9-9kar.json?casetopic=Bicycle%20Lanes%20%26%20Programs" # includes the query casetopic = Bicycle Lanes, encoded as URL
@@ -264,6 +269,7 @@ This chart will be easier to read if the categories are collapsed into fewer, st
 
 ```{r CCUxCat}
 library(forcats) 
+library(tidyr)
 
 #Use fct_collapse to group multiple factors levels into fewer buckets
 CCUsCollapse <- CCU_df %>% mutate(caseissueFCT = as.factor(caseissue)) %>% 
@@ -345,7 +351,7 @@ register_google(key = key)
 
 #note: requires dev version of ggmap
 #devtools::install_github("dkahle/ggmap", ref = "tidyup")
-#note: I have stored my private Google API key
+#note: I have stored my private Google API key. To get your own, visit: https://developers.google.com/maps/documentation/javascript/get-api-key
 
 myMap <- get_map(location = c(lon = -74.0060, lat = 40.7128), zoom = 11)
 
@@ -411,9 +417,10 @@ Now that we have explored the data a litle bit, we can begin to tackle our main 
 
 ###Data content
 
-A challenge with the CCU dataset is that messages tagged as "concerns" can be either concerns that are in <i>favor</i> of the expansion of the bike lane network, or messages that are <i>against</i> the installation of bike lanes. Therefore it is necessary to make assumptions about which categories of messages indicate the sender is in favor of bike lanes (requests for bike racks, for example) and which are opposed (requests to remove or relocate bike lanes).
+<strong>Metadata about each message, or the total number of messages, is sufficient to measure public sentiment.</strong>
+A challenge with the CCU dataset is that messages tagged as "concerns" can be either concerns that are in <i>favor</i> of the expansion of the bike lane network, or messages that are <i>against</i> the installation of bike lanes. Therefore it is necessary to make assumptions about which categories of messages indicate the sender is in favor of bike lanes (requests for bike racks, for example) and which are opposed (requests to remove or relocate bike lanes). Ultimately, after exploring the data, it seems that the best proxy for public sentiment is simply the total number of messages, which are likely to be complaints.
 
-A second assumption is that message writers will send their message in the same calendar year as the infrastructure they are writing about was built--if, in fact, they are writing in response to new bike lane segments.
+<strong>CCUs in response to new infrastructure will occur in the same calendar year as the installation of the bike lane.</strong> A second assumption is that message writers will send their message in the same calendar year as the infrastructure they are writing about was built--if, in fact, they are writing in response to new bike lane segments.
 
 ###Data structure
 
@@ -421,9 +428,9 @@ A second assumption is that message writers will send their message in the same 
 
 ###Data coding
 
-<strong>Assumes data is coded correctly and consistently</strong>. We cannot see the underlying messages, and so must assume the data was coded correctly and consistently tagged in each category. This analysis assumes that all messages are coded consistently by different reviewers and from one year to the next--in reality both of these assumptions are likely to be incorrect, at least to a point. For example, one reviewer may code a complaint about a new bike lane as "Concern" while a different reviewer in a different year might code a very similar message as "Remove or Relocate." My experience in working with these messages is that, in fact, messages are very often mis-coded, with concerns about bike share directed to the bicycle lane unit, and vice versa.
+<strong>Data is coded correctly and consistently</strong>. We cannot see the underlying messages, and so must assume the data was coded correctly and consistently tagged in each category. This analysis assumes that all messages are coded consistently by different reviewers and from one year to the next--in reality both of these assumptions are likely to be incorrect, at least to a point. For example, one reviewer may code a complaint about a new bike lane as "Concern" while a different reviewer in a different year might code a very similar message as "Remove or Relocate." My experience in working with these messages is that, in fact, messages are very often mis-coded, with concerns about bike share directed to the bicycle lane unit, and vice versa.
 
-<strong>Assumes location data is coded related to the message, rather then the customer address</strong>. By mapping the data, we also assume that the location data refers to the location of the concern rather than the writer. This is an assumption I have more confidence in being true, at least most of the time.
+<strong>Location data is coded related to the message, rather then the customer address</strong>. By mapping the data, we also assume that the location data refers to the location of the concern rather than the writer. This is an assumption I have more confidence in being true, at least most of the time.
 
 ##Spatial analysis
 The map below shows some correlation between the year a segment of bike lane was installed and the requests to remove them; however, the correlation is not great. 
@@ -436,14 +443,17 @@ ggmap(get_map("New York", maptype = "terrain-background", zoom = 11)) +
   geom_line(data = bikesYearGoogle,                      #add bike map
             aes(x = long, y = lat, group = group),
             alpha = .25) +           
-  geom_line(data = filter(bikesYearGoogle, year > 2012), #add highlight for lines 2012-2017
+  geom_line(data = filter(bikesYearGoogle, year > 2011), #add highlight for lines 2012-2017
             aes(x = long, y = lat, group = group, 
                 col = as.factor(year))) +                #show year installed
   geom_point(data = filter(CCU_df,                       #add CCUs, filtered 
-                           caseissue=="Remove or Relocate"), 
+                           caseissue=="Remove or Relocate",
+                           year < 2017), 
              aes(x = lon, y = lat, col=as.factor(year)), 
-             size = 2) +
-  ggtitle("Requests to Remove or Relocate NYC Bike Lanes\n(2012-2017)")
+             size = 1,
+             alpha = 0.5) +
+  ggtitle("Requests to Remove or Relocate NYC Bike Lanes\n(2011-2016)")
+  
 ```
 
 Zooming in on a high request-density area, we can see a cluster of requests to remove or relocate bike lanes in areas and years where no bike lanes were installed in Lower Manhattan and the Brooklyn neighborhoods of Park Slope and Cobble Hill. This seems to indicate that the relationship may not be so strong.
@@ -455,14 +465,15 @@ ggmap(get_map(location = c(lon = -73.99, lat = 40.70),
   geom_line(data = bikesYearGoogle,                      #add bike map
             aes(x = long, y = lat, group = group),
             alpha = .25) +           
-  geom_line(data = filter(bikesYearGoogle, year > 2012), #add highlight for lines 2012-2017
+  geom_line(data = filter(bikesYearGoogle, year > 2011), #add highlight for lines 2012-2017
             aes(x = long, y = lat, group = group, 
                 col = as.factor(year))) +                #show year installed
   geom_point(data = filter(CCU_df,                       #add CCUs, filtered 
-                           caseissue=="Remove or Relocate"), 
+                           caseissue=="Remove or Relocate",
+                           year < 2017), 
              aes(x = lon, y = lat, col=as.factor(year)), 
              size = 2) +
-  ggtitle("High Density Requests to Remove or Relocate NYC Bike Lanes\n(2012-2017)")
+  ggtitle("High Density Requests to Remove or Relocate NYC Bike Lanes\n(2012-2016)")
 ```
 
 ##Graphic Analysis
