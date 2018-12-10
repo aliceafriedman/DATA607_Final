@@ -1,0 +1,633 @@
+---
+title: "Final Project"
+author: "Alice Friedman"
+date: "12/9/2018"
+output:
+  html_document:
+    theme: yeti
+    code_folding: show
+    toc: TRUE
+    toc_depth: 2
+    toc_float: TRUE
+---
+
+<style type="text/css">
+
+code.r{
+  font-size: 10px;
+}
+
+</style>
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache = TRUE, warning = FALSE, message = FALSE)
+remove(list = ls())
+myKey <- "AIzaSyBzstY2XKKisJNMCnwWUJoO31naqtFpg_w"
+```
+
+#Introduction
+##Project purpose and motivation
+![](https://github.com/aliceafriedman/Data607_Final/Bikelash.png)
+
+Bike lanes are controversial! Complaints about bike lanes are common in local media, but how much do New York residents actually object?
+
+Using publicly available data on the location and timing of installation of new bike lanes in NYC and messages from the public sent to the NYC Department of Transportation, we will explore whether there is any correlation between public dissatisfaction with bike lanes and the amount of new bike lanes installed in a given calendar year.
+
+This project will pull from three types of data: 
+
+1. Bike lane data will be drawn from published records of bike lane installation available through NYC Open Data. This data is stored as a shapefile (.SHP)  and will be scraped from the web. 
+
+2. The message data will be drawn from the DOT's Commissioner's Correspondence Unit (CCU), which consists of tagged message metadata of many types (including emails, letters, phone calls, social media, and webforms) sent to the NYC Department of Transportation. The data pulled for this analysis is all tagged as "Bicycle Lanes and Programs," and will be used as a proxy for public sentiment. This data is stored as JSON and will be retrieved from an API.
+
+3. Maps pulled from the Google API using ```ggmap```.
+
+#Part 1: Data Acquisition
+
+##Dataset 1: Bicycle Route Data
+The first dataset needed is the <a href="https://data.cityofnewyork.us/Transportation/Bicycle-Routes/7vsa-caz7" target="_blank">bicycle route data</a> available from NYC Open Data. This data set is given as a shapefile--a special file structure for storing projected spatial data, which appears to be multiple files of various types (.sbn, .sbx, .dbf, etc.), but can be read as a single file (the shapefile) by specialized mapping programs and packages. 
+
+To acquire the data, first we need to download and unzip the relevant files from the web. We will find and download the correct links using the ```XML``` and ```RCurl``` packages. Then we can read is as a shapefile using the ```rgdal``` package.
+
+###Step 1: Load needed libraries to scrape the website for links to download.
+
+Libraries needed include ```XML```, ```RCurl```, and ```stringr```.
+
+```{r libraries1, message=FALSE}
+library(XML)
+library(RCurl)
+library(stringr)
+```
+
+###Step 2: Parse website to find links
+We will parse the content of the website by creating and then running a function to get a list of desired filenames from a specified URL matching a given regular expression--in this case we are looking for a .zip file. 
+
+```{r getFileNamesList}
+getFileNamesList <- function(url, regX) {
+  https_doc <- getURLContent(url) #necessary to use getURL from RCurl because of https
+  links <- getHTMLLinks(https_doc) #scrape url for links
+  filenames <- links[str_detect(links, regX)] #store links as file names, limiting results to those of interest
+  as.list(filenames) #convert to list in case there is more than one version 
+}
+
+#set arguments for funciton
+url <- "https://data.cityofnewyork.us/Transportation/Bicycle-Routes/7vsa-caz7"
+regX <- ".+[.]zip"
+
+#run function
+filenames_list <- getFileNamesList(url, regX)
+filenames_list
+```
+
+###Step 3: Create and run function to download relevant files
+
+In the next step, we will create and run a function to download the files identified in the previous step. 
+
+This program will not download files if they already exist in the specified folder. 
+As it turns out, only one file needs to be downloaded, but it's useful to have the function in case more than one link turns out to be needed.
+
+```{r download}
+#create function to download file to specified folder
+download <- function(filename, baseurl, folder, reg = ".*") {
+  if(!dir.exists(folder)){dir.create(folder, recursive = TRUE)} #create folder(s) not there
+  fileurl <- str_c(baseurl, filename) #URL to download
+  fileout <- str_extract(filename, reg) #allows for more general use with different paths
+  if(!file.exists(str_c(folder, "/", fileout))) {
+    download.file(fileurl, 
+                  destfile = str_c(folder, "/", fileout))
+    Sys.sleep(1)
+  }
+}
+```
+
+###Step 4: Run the function to download the file
+
+The following code will check to see if you have a "data/temp" folder, and then create one if it does not exist, and then download the file(s) to that folder. This will appear in your working drive, wherever that is set.
+
+```{r run_download}
+#set arguments to function
+baseurl <- "https://data.cityofnewyork.us" #note: this requires inspection of the website to determine how the links work
+folder <- "data/temp"
+reg <- "[[:alnum:]]+[.]zip$" # accounts for path inside filename
+  
+#run function
+download(filenames_list[[1]], baseurl, folder, reg)
+```
+
+###Step 5: Unzip the file to access and load the CSV into a data frame
+
+```{r unzip}
+#list files
+filelist <- list.files("data/temp")
+filelist
+
+if(!dir.exists("data/bike")){dir.create("data/bike", recursive = TRUE)} #create folder(s) not there
+
+unzip(str_c("data/temp/", "routes.zip"), exdir = "data/bike") #unzip tp data folder
+
+list.files("data/bike") #read data folder to see what's there now
+```
+
+
+###Step 6: Read shapefile using ```rgdal```
+
+```{r shapefile, warning = FALSE}
+library(rgdal)
+filepath <- "data/bike"
+bikeSHP <- readOGR(filepath, "nyc_bike_routes_2017")
+summary(bikeSHP)
+```
+
+##Dataset 2: Commissioner’s Correspondence Unit messages (JSON)
+This data, in JSON format, will be retrieved from the NYC Open Data API, filtering for bike related messages in the query.
+
+###Step 1: Setup
+Load necessary libraries, which include ```jsonlite```, ```dplyr```, and ```httr```.
+
+```{r libraries2}
+library(httr)
+library(jsonlite)
+library(dplyr)
+```
+
+### Step 2: Download JSON data from API
+After inspecting the data on NYC's Open Data visualizer I determined that there are ~7,000 records that match the initial query, which is to locate records where the Case Topic is "Bicycle Lanes & Programs". The Socrata API returns records 1,000 at a time, so multiple calls are necessary to retrieve all records.
+
+One note: Because JSON data does not have "nulls" per se (rather, the records are simply not there if not explicitly entered as "NA"), there are some fields present in each API call that are missing in the other two. For this reason, I have used ```full_join``` instead of ```union``` to merge the datasets into one.
+
+JSON data from an API is a lot easier to load (2 steps instead of 7) than parsing a website to find a zipped file containing a shapefile!
+
+```{r API, cache = TRUE, message = FALSE}
+baseurl <- "https://data.cityofnewyork.us/resource/paw9-9kar.json?casetopic=Bicycle%20Lanes%20%26%20Programs" # includes the query casetopic = Bicycle Lanes, encoded as URL
+
+allSearch <- fromJSON(baseurl) #creates a data frame from JSON retrieved through API
+
+for(n in 1:6){
+  i <- n*1000
+  searchCCU <- fromJSON(paste0(baseurl,"&$offset=",i)) #searches for pages in chunks of 1000
+  allSearch <- full_join(allSearch, searchCCU) #combines data into original data frame
+}
+
+glimpse(allSearch)
+```
+
+#Part 2: Data Exploration
+First, we will create a simple map showing the bicycle route data by facility type, using the object, ```bikeSHP```, which is an R object containing shapefile information.
+
+##Map bicycle network data using ```spplot```
+
+The spatial mapping package ```spplot``` produces high quality maps with very few lines of code by reading in shapefiles. Graduated color palettes and attractive formatting come standard, for example.
+
+```{r spplot}
+spplot(bikeSHP, z = "ft_facilit")
+```
+
+##Transform the data using ```dplyr``` and ```broom```
+The downside of the ```spplot``` package is that shapefiles cannot be easily manipulated in R, making the addition of other data types difficult. For this reason, we will transform the shapefile into a data frame so that it can be read by ```ggplot``` and mapped using ```ggmap```. The transformation to a data frame is done using the ```broom::tidy``` function. 
+
+<i>Note: Code in this section is adapted from <a href="https://cengel.github.io/rspatial/4_Mapping.nb.html" target="_blank">Making Maps in R</a> by Claudia A. Engel.</i>
+
+```{r tidySHP}
+#code adapted from https://cengel.github.io/rspatial/4_Mapping.nb.html
+library(broom)
+bikes_raw <- tidy(bikeSHP)
+bikeSHP$lineID <- sapply(slot(bikeSHP, "lines"), function(x) slot(x, "ID"))
+bikes_df <- merge(bikes_raw, bikeSHP, by.x = "id", by.y="lineID")
+head(bikes_df)
+```
+
+Next, we will transform the data using ```dplyr``` to obtain the year each segment was installed. 
+
+```{r transformTidySHP}
+library(lubridate)
+bikes_installed_df <- bikes_df %>% 
+  mutate(yearInstalled = lubridate::year(as.Date(instdate))) %>% 
+  glimpse()
+```
+
+Finally, we can map the data using ```ggplot2```.
+
+```{r ggplotMap}
+#all code in this chunk adapted from https://cengel.github.io/rspatial/4_Mapping.nb.html
+library(ggplot2)
+
+#Plot the NYC Bike Network by year each segment was installed
+ggplot() +                                               
+  geom_line(                                             # make a line
+    data = bikes_installed_df,                           # data frame
+    aes(x = long, y = lat, group = group,                # group by lines
+    col = yearInstalled)) +                              # color by **yearInstalled**
+  ggtitle("NYC Bike Map, 2017, by Installation Date") +  # add title
+  theme(line = element_blank(),                          # remove axis lines .. 
+        axis.text=element_blank(),                       # .. tickmarks..
+        axis.title=element_blank(),                      # .. axis labels..
+        panel.background = element_blank()) +            # .. background gridlines
+  coord_equal()                                          # both axes the same scale
+
+#Plot the NYC Bike Network by segment type
+ggplot() +                                               
+  geom_line(                                             # make a line
+    data = bikes_installed_df,                           # data frame
+    aes(x = long, y = lat, group = group,                # coordinates, and group them by lines
+    col = tf_facilit)) +                                 # color by **tf_facilit**, which is the segment type
+  ggtitle("NYC Bike Map, 2017, by Segment Type") +       # add title
+  theme(line = element_blank(),                          # remove axis lines .. 
+        axis.text=element_blank(),                       # .. tickmarks..
+        axis.title=element_blank(),                      # .. axis labels..
+        panel.background = element_blank()) +            # .. background gridlines
+  coord_equal()                                          # both axes the same scale
+```
+
+##Exploration of the CCU data
+
+How many messages of each type are received in a given year? We will first create a data frame from the JSON query data and transform it to obtain a "year" field using the ```lubridate::year``` function. We will also reclassify and rename the latitude and longitude data so that it can be more easily mapped in a later step using ```ggplot```.
+
+```{r transformCCUdata}
+CCU_df <- allSearch %>%
+  mutate(
+    year = lubridate::year(as.Date(createddate)),
+    lat = as.numeric(latitude),
+    lon = as.numeric(longitude)) %>% 
+  glimpse()
+```
+
+```{r CCUsbyIssue}
+library(kableExtra) #for formatting table
+
+CCU_df %>% select(caseissue) %>% 
+  group_by(caseissue) %>% 
+  summarise(count = n()) %>% 
+  arrange(desc(count)) %>% 
+  kable() %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
+
+This chart will be easier to read if the categories are collapsed into fewer, still meaningful buckets. We can perform this transformation using the ```forcats``` package. 
+
+```{r CCUxCat}
+library(forcats) 
+
+#Use fct_collapse to group multiple factors levels into fewer buckets
+CCUsCollapse <- CCU_df %>% mutate(caseissueFCT = as.factor(caseissue)) %>% 
+  mutate(caseIssueType = fct_collapse(caseissueFCT,
+  "Likely Supportive" = c(
+    "Bicycle Rack",
+    "Bicycle Map",
+    "Safety Material/Helmet Related",
+    "Repair"
+  ),
+  "Likely Opposed" = c(
+    "Remove or Relocate", 
+    "Concern", 
+    "Safety",
+    "No Parking"),
+  "Neutral/Unknown" = c(
+    "Commercial Cyclist - Rider Identification", 
+    "Commercial Cyclist - General",
+    "Commercial Cyclist - Bicycle Safety Devices",
+    "Commercial Cyclist - Safety Poster",
+    "Commercial Cyclist - Sign on Bike", 
+    "Study",
+    "Outreach Campaigns",
+    "General Information",
+    "Regulations",
+    "Comment",
+    "Bicycle Lane"
+    )
+))
+
+#Use fct_explicit_na to relevel missing values as "Neutral/Unknown"
+CCUsCollapse$caseIssueType <- CCUsCollapse$caseIssueType %>% fct_explicit_na(na_level = "Neutral/Unknown")
+
+#show last 5 years of data as table  
+CCUsCollapse %>% select(caseIssueType, year) %>% 
+  group_by(year, caseIssueType) %>%
+  summarise(count = n()) %>% 
+  arrange(desc(count)) %>%
+  filter(year > 2013) %>% 
+  spread(year, count) %>% 
+  rename(`Message Type` = caseIssueType) %>% 
+  kable(caption = "Commissioner's Correspondence by Likely Sentiment, Year") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+
+#show last 5 years of data as chart
+CCUsCollapse %>% select(caseIssueType, year) %>% 
+  group_by(year, caseIssueType) %>%
+  summarise(count = n()) %>% 
+  arrange(desc(count)) %>%
+  filter(year > 2012) %>% 
+  filter(year < 2018) %>% 
+  rename(`Message Type` = caseIssueType) %>% 
+  ggplot + geom_col(aes(year, count, fill=`Message Type`), position= "dodge") +
+  ggtitle("Correspondence to DOT's Bicycle Lanes and Program, 2012-20127") +
+  xlab("Year") + ylab("Count")
+
+
+```
+
+What if we look at just requests to remove or relocate a bike lane?
+
+```{r graphRemoveRequests}
+CCU_df %>% filter(caseissue=="Remove or Relocate") %>% 
+  rename(`Case Issue`=caseissue) %>% 
+  ggplot() + geom_bar(aes(year, fill=`Case Issue`)) +
+  ggtitle("Correspondence to NYC DOT Bicycle Lanes and Programs, 2013-2017")+
+  theme(plot.title = element_text(size = rel(1.4)),
+           legend.position = "top") +
+  xlab("Year") + ylab("Count")
+```
+
+2016 was a high point for requests to remove or relocate bike lanes! What if we map these?
+
+```{r google_api, cache=TRUE, message=FALSE, warning=FALSE}
+library(googleway)
+library(ggmap)
+key <- myKey
+register_google(key = key)
+
+#note: requires dev version of ggmap
+#devtools::install_github("dkahle/ggmap", ref = "tidyup")
+#note: I have stored my private Google API key
+
+myMap <- get_map(location = c(lon = -74.0060, lat = 40.7128), zoom = 11)
+
+CCUdata2016 <- CCU_df %>% ungroup() %>% 
+  rename(`Case Issue` = caseissue) %>% 
+  filter(year==2016) %>% 
+  filter(!is.na(latitude), !is.na(longitude)) %>% 
+  mutate(lon = as.numeric(longitude), lat = as.numeric(latitude))
+
+myMap %>% ggmap() +
+  geom_point(data = CCUdata2016, 
+             aes(x = lon, y = lat, col=`Case Issue`), 
+             alpha = 0.5, 
+             size = 1) +
+  ggtitle("NYC DOT Correspondence by Case Issue (2016)") +
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank())
+
+```
+
+##Combining the datasets
+
+Finally, we will create a map using both sets of data so that we can begin to explore the question of whether there is a correlation between new bike segments (stored in the ```bikeSHP``` object) and correspondence to the DOT (stored in the ```CCU_df``` object). 
+
+To do this, we first have to re-project the spatial data stored in ```bikeSHP``` to the coordinate system used by ```ggmap```, whose source is Google maps. (Otherwise the maps will not line up correctly.) This can be done with the ```spTransform``` function. Then, we will repeat the previous data transformation steps with ```broom::tidy``` to transform the shapefile back into a data frame. 
+<i>This section of code draws heavily from <a href="https://cengel.github.io/rspatial/4_Mapping.nb.html" target="_blank">Mapping in R</a>.</i>
+
+```{r reprojectBikes}
+# All code in this chunk adapted from https://cengel.github.io/rspatial/4_Mapping.nb.html
+bikesGoogleMaps <- spTransform(bikeSHP, CRS("+init=epsg:4326"))
+bikes_dfGoogleMaps <- tidy(bikesGoogleMaps)
+bikesGoogleMaps$lineID <- sapply(slot(bikesGoogleMaps, "lines"), function(x) slot(x, "ID"))
+bikes_dfGoogleMaps <- merge(bikes_dfGoogleMaps, bikesGoogleMaps, by.x = "id", by.y="lineID")
+head(bikes_dfGoogleMaps)
+```
+
+Repeating our earlier plot, we can see how ```ggplot``` and ```spplot``` handle mapping differently.
+
+```{r ggplotBikesYear}
+register_google(key = key)
+
+#Plot the NYC Bike Network by segment type
+bikesYearGoogle <- bikes_dfGoogleMaps %>% 
+  mutate(year = lubridate::year(as.Date(instdate)))
+
+basemap <- get_map("New York", zoom = 11)
+
+
+ggmap(basemap) +                                               
+  geom_line(data = bikesYearGoogle,                                             
+    aes(x = long, y = lat, group = group,                
+    col = year)) +
+  geom_point(data = CCU_df,
+    aes(x = lon, y = lat, col=year), size = 1) +
+  ggtitle("NYC Bike Map, 2017, by Year")
+```
+
+#Part 3: Analysis
+Now that we have explored the data a litle bit, we can begin to tackle our main question: What is the relationship between CCU messages and bike network development? We will perform this analysis using a map, graphs, and a statistical test.
+
+##Assumptions and Limitations of the Analysis
+
+###Data content
+
+A challenge with the CCU dataset is that messages tagged as "concerns" can be either concerns that are in <i>favor</i> of the expansion of the bike lane network, or messages that are <i>against</i> the installation of bike lanes. Therefore it is necessary to make assumptions about which categories of messages indicate the sender is in favor of bike lanes (requests for bike racks, for example) and which are opposed (requests to remove or relocate bike lanes).
+
+A second assumption is that message writers will send their message in the same calendar year as the infrastructure they are writing about was built--if, in fact, they are writing in response to new bike lane segments.
+
+###Data structure
+
+<strong>Number of segments is a good proxy for amount of construction and overall segment length.</strong> A third assumption (based on my experience with working with this dataset in ArcMAP) is that each segment is roughly the same length. 
+
+###Data coding
+
+<strong>Assumes data is coded correctly and consistently</strong>. We cannot see the underlying messages, and so must assume the data was coded correctly and consistently tagged in each category. This analysis assumes that all messages are coded consistently by different reviewers and from one year to the next--in reality both of these assumptions are likely to be incorrect, at least to a point. For example, one reviewer may code a complaint about a new bike lane as "Concern" while a different reviewer in a different year might code a very similar message as "Remove or Relocate." My experience in working with these messages is that, in fact, messages are very often mis-coded, with concerns about bike share directed to the bicycle lane unit, and vice versa.
+
+<strong>Assumes location data is coded related to the message, rather then the customer address</strong>. By mapping the data, we also assume that the location data refers to the location of the concern rather than the writer. This is an assumption I have more confidence in being true, at least most of the time.
+
+##Spatial analysis
+The map below shows some correlation between the year a segment of bike lane was installed and the requests to remove them; however, the correlation is not great. 
+
+```{r bikeAnalysisMaps1, cache=TRUE, warning=FALSE}
+register_google(key = key)
+
+#Overall map, showing requests to remove bike lanes and year segments were installed
+ggmap(get_map("New York", maptype = "terrain-background", zoom = 11)) +
+  geom_line(data = bikesYearGoogle,                      #add bike map
+            aes(x = long, y = lat, group = group),
+            alpha = .25) +           
+  geom_line(data = filter(bikesYearGoogle, year > 2012), #add highlight for lines 2012-2017
+            aes(x = long, y = lat, group = group, 
+                col = as.factor(year))) +                #show year installed
+  geom_point(data = filter(CCU_df,                       #add CCUs, filtered 
+                           caseissue=="Remove or Relocate"), 
+             aes(x = lon, y = lat, col=as.factor(year)), 
+             size = 2) +
+  ggtitle("Requests to Remove or Relocate NYC Bike Lanes\n(2012-2017)")
+```
+
+Zooming in on a high request-density area, we can see a cluster of requests to remove or relocate bike lanes in areas and years where no bike lanes were installed in Lower Manhattan and the Brooklyn neighborhoods of Park Slope and Cobble Hill. This seems to indicate that the relationship may not be so strong.
+
+```{r}
+#Zoom to high density request area (inner Brooklyn/Lower Manhattan)
+ggmap(get_map(location = c(lon = -73.99, lat = 40.70), 
+              maptype = "terrain-background", zoom = 13)) +
+  geom_line(data = bikesYearGoogle,                      #add bike map
+            aes(x = long, y = lat, group = group),
+            alpha = .25) +           
+  geom_line(data = filter(bikesYearGoogle, year > 2012), #add highlight for lines 2012-2017
+            aes(x = long, y = lat, group = group, 
+                col = as.factor(year))) +                #show year installed
+  geom_point(data = filter(CCU_df,                       #add CCUs, filtered 
+                           caseissue=="Remove or Relocate"), 
+             aes(x = lon, y = lat, col=as.factor(year)), 
+             size = 2) +
+  ggtitle("High Density Requests to Remove or Relocate NYC Bike Lanes\n(2012-2017)")
+```
+
+##Graphic Analysis
+
+Because the vast majority of messages are tagged as issue types which cannot be parsed more than "neutral unknown," we will assume (reasonably, based on my experience) that messages are mostly complaints. In other words, the number of CCUs received in a given year can be a proxy for public sentiment against the expansion of the bike network. 
+
+To see if bike network expansion is driving complaints, we can first see if the number of CCU messages received correlates to the number of segments installed when the data sets are joined by "year" and "streets". 
+
+If no correlation is found, we go one step back to see if the total number of CCU messages received in a calendar year has any correlation with the number of new segments of bike lanes installed in the same year.
+
+###New Segments vs. Number of Messages
+
+Does the number of new segments constructed in a given time period correlate with the number of "Bicycle Lanes and Programs" correspondence items received by the NYC Department of Transportation?
+
+A few data cleaning steps will be needed before we can run this analysis:
+
+1. Because off-street bicycle lane segments are typically not under the jurisdiction of the DOT, we will exclude segments coded as "OFF" in the field ```onoffst```.
+
+2. Street names are coded differently in the two data sets! CCUs are *usually but not always* coded in CamelCase with the full street name (e.g. "Queens Boulevard"), which the bike network data is all caps and abbreviations (e.g. "QUEENS BLVD"). Therefore we will need to run some regular expressions and data transformations in order to correctly join the data and standardize the format.
+
+3. We will need to create a merged version of the two data sets that correctly counts both bike lane segments installed ("Segs") and items of correspondence received by the DOT ("CCUs") by year and street.
+
+```{r CMergeByStreetAndYear}
+library(stringr)
+#CCUsBikesMerge 
+
+CCUsByStreetYear <- CCU_df %>% 
+  select(year, streetname) %>% 
+  rename(street = streetname) %>% 
+  mutate(street = toupper(street)) %>% 
+  mutate(street = str_trim(street)) %>% 
+  mutate(street = str_remove_all(street, "[[:punct:]]")) %>%
+  #replace all abbreviations with full words
+    mutate(street = gsub(" ST$", "STREET", street)) %>%     
+    mutate(street = gsub("^ST ", "SAINT", street)) %>%     
+    mutate(street = gsub(" DR$", "DRIVE", street)) %>% 
+    mutate(street = gsub(" BLVD$", "BOULEVARD", street)) %>% 
+    mutate(street = gsub(" AV(E)?$", "AVENUE", street)) %>%  #4 Av, e.g.
+    mutate(street = gsub("AV(E)? ", "AVENUE", street)) %>%  #Ave C, e.g.
+    mutate(street = gsub(" RD$", "ROAD", street)) %>%
+    mutate(street = gsub("^N ", "NORTH", street)) %>% 
+    mutate(street = gsub("^S ", "SOUTH", street)) %>% 
+    mutate(street = gsub("^E ", "EAST", street)) %>% 
+    mutate(street = gsub("^W ", "WEST", street)) %>%
+    mutate(street = gsub(" N$", " NORTH", street)) %>% 
+    mutate(street = gsub(" S$ ", " SOUTH", street)) %>% 
+    mutate(street = gsub(" E$", " EAST", street)) %>% 
+    mutate(street = gsub(" W$", " WEST", street)) %>%
+  #remove all variations of "nth" using look-behind regex
+    mutate(street = str_remove_all(street, "(?<=[0-9])(?:ST|ND|RD|TH)")) %>% 
+  group_by(year, street) %>% 
+  arrange(street) %>% 
+  summarize(CCUs=n())%>% 
+  glimpse()
+
+SegsByStreetYear <- bikesYearGoogle %>% select(year, street, onoffst) %>% 
+  filter(onoffst=="ON") %>% 
+  select(-onoffst) %>%
+  mutate(street = toupper(street)) %>% 
+  mutate(street = str_trim(street)) %>% 
+  mutate(street = str_remove_all(street, "[[:punct:]]")) %>%
+  #replace all abbreviations with full words
+    mutate(street = gsub(" ST$", " STREET", street)) %>%     
+    mutate(street = gsub("^ST ", "SAINT ", street)) %>%     
+    mutate(street = gsub(" DR$", " DRIVE", street)) %>% 
+    mutate(street = gsub(" BLVD$", " BOULEVARD", street)) %>% 
+    mutate(street = gsub(" AV(E)?$", " AVENUE", street)) %>%  #4 Av, e.g.
+    mutate(street = gsub("^AV(E)? ", "AVENUE ", street)) %>%  #Ave C, e.g.
+    mutate(street = gsub(" RD$", " ROAD", street)) %>%
+    mutate(street = gsub("^N ", "NORTH ", street)) %>% 
+    mutate(street = gsub("^S ", "SOUTH ", street)) %>% 
+    mutate(street = gsub("^E ", "EAST ", street)) %>% 
+    mutate(street = gsub("^W ", "WEST ", street)) %>%    
+    mutate(street = gsub(" N$", " NORTH", street)) %>% 
+    mutate(street = gsub(" S$ ", " SOUTH", street)) %>% 
+    mutate(street = gsub(" E$", " EAST", street)) %>% 
+    mutate(street = gsub(" W$", " WEST", street)) %>%
+  #remove all variations of "nth" using look-behind regex
+    mutate(street = str_remove_all(street, "(?<=[0-9])(?:ST|ND|RD|TH)")) %>% 
+  group_by(year, street) %>%
+  arrange(street) %>% 
+  summarize(Segs=n()) %>% glimpse()
+
+CCUsLanesMerge <- full_join(CCUsByStreetYear, SegsByStreetYear) %>% arrange(desc(Segs))
+head(CCUsLanesMerge)
+
+CCUsLanesMerge %>% ungroup() %>% 
+  filter(year > 2011) %>% 
+  filter(year < 2017) %>% 
+  mutate(year = as.factor(year)) %>% 
+  ggplot+geom_jitter(aes(x=Segs, y=CCUs, col=year)) +
+  scale_x_log10() +
+  scale_y_log10() +
+  ggtitle("DOT Correspondence (CCUs) per Street per Year\nby Number of Segments New Bike Lane (2013-2017)")+
+  xlab("Number of Segments of Bike Lane Installed")
+```
+
+In the above analysis, no correlation is apparent between the numbere of segments installed on a given street and CCUs received regarding that street in the same year. 
+
+As a next step, we will re-run the analysis without joining by street--in other words, we will look to see if the *total* number of new bike lane segments installed correlates to the *total* number of Bicycle Lanes and Programs CCUs received.
+
+```{r MergeByYear}
+CCUsByYear <- CCU_df %>% 
+  select(year) %>% 
+  filter(year < 2017) %>% 
+  group_by(year) %>% 
+  summarise(CCUs = n()) %>% 
+  glimpse()
+
+LanesByYear <- bikesYearGoogle %>% 
+  select(year) %>% 
+  filter(year < 2017) %>% 
+  group_by(year) %>% 
+  summarise(Lanes = n()) %>% 
+  glimpse()
+
+MergeByYear <- full_join(CCUsByYear, LanesByYear) %>% arrange(desc(year)) %>% filter(year < 2017)
+glimpse(MergeByYear)
+
+MergeByYear %>% 
+  filter(year > 2000) %>% 
+  mutate(year = as.factor(year)) %>% 
+  ggplot + geom_jitter(aes(x=Lanes, y=CCUs, col=year, size = CCUs)) +
+  geom_smooth(aes(x=Lanes, y=CCUs), method='lm') +
+  ggtitle("Correlation of Number of CCUs received by Bicycle Lane Segments\n(2000-2016)")
+```
+
+Now it looks as though there may be a trend! We can confirm with a statistical analysis.
+
+##Statistical Analysis
+
+```{r stats}
+
+model <- lm(CCUs ~ Lanes, MergeByYear)
+
+summary(model)
+```
+
+As we can see from the model, while there is a slight trend in the graph, it has no statistical significance.
+
+
+#Conclusion
+
+Commissioner's Correspondence items (CCUs) received by the Department of Transportation and coded as "Bicycle Lanes & Programs" do not seem to vary significantly by the number of segments of new bicycle lanes installed. This is an interesting finding as the number of segments installed by year have varied quite a bit!
+
+##What worked and what didn't
+
+###Data Availability
+
+<strong>Some data was unavailable publicly.</strong> My initial idea was to perform a sentiment analysis on the content of the messages themselves. This was based on a similar analysis I had performed on NYC Parks Department data some years ago; however, it turns out that this level of information is not available through open data.
+
+###Socrata API and JSON data
+
+<strong>JSON data is much easier to work with than CSVs.</strong>Initially, I had tried to load a static CSV containing all the 311 data from NYC. This was a large (10+MB) file, and it was very challenging to load. Once loaded, it was very challenging to parse, as it was a comma-delimited CSV whose values sometimes *also* contained commas. Ultimately, I was only able to load and correctly parse the data by using the JSON-based API. As it turned out, this dataset didn't have the right kinds of information anyway! Luckily the same code was applicable to the correct dataset (the CCU information), and having learned the significant advantages of reading the JSON data (namely, correct assignment of values to fields, reduced memory use, and much faster load times), loading this dataset into an R data frame was a snap.
+
+###Mapping the data
+
+<strong>R packages for spatial analysis are great!</strong> Using the various mapping packages available in R turned out to be surprisingly straight-forward, and runs significantly faster than software used for spatial analysis in the world of urban planning. I would definitely use R for spatial analysis again!
+
+#References
+
+Data source for Commissioner's Correspondence on Bike Lanes: <a href="https://data.cityofnewyork.us/Transportation/Commissioner-s-Correspondence/b4mf-rg6h" target="_blank">Open Data</a>
+
+Data source <a href="https://data.cityofnewyork.us/resource/paw9-9kar.json" target="_blank">Commissioner's Correspondence on Bike Lanes</a> (JSON data, API)
+
+```ggmap``` CheatSheet: https://www.nceas.ucsb.edu/~frazier/RSpatialGuides/ggmap/ggmapCheatsheet.pdf
+
+<a href="https://cengel.github.io/rspatial/4_Mapping.nb.html" target="_blank">Making Maps in R</a> by Claudia A. Engel
