@@ -21,7 +21,7 @@ code.r{
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, cache = TRUE, warning = FALSE, message = FALSE)
 remove(list = ls())
-myKey <- "AIzaSyBzstY2XKKisJNMCnwWUJoO31naqtFpg_w"
+
 ```
 
 #Introduction
